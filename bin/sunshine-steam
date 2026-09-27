@@ -1,0 +1,4 @@
+#!/bin/sh
+# Import the live graphical session env (Sunshine may have started before login)
+eval "$(systemctl --user show-environment | grep -E '^(DISPLAY|XAUTHORITY|WAYLAND_DISPLAY|XDG_SESSION_TYPE|DBUS_SESSION_BUS_ADDRESS)=' | sed 's/^/export /')"
+exec setsid steam "$@"

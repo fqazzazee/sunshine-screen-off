@@ -1,0 +1,253 @@
+#!/usr/bin/env python3
+"""Stream-only virtual display for Sunshine on GNOME (Mutter).
+
+  sunshine-virtual-display start   create a virtual monitor sized to the Moonlight
+                                   client, make it the only active display and point
+                                   Sunshine's portal permission at it
+  sunshine-virtual-display stop    remove it; Mutter restores the physical monitor
+  sunshine-virtual-display reset   stop, and make sure the portal permission points
+                                   at the physical monitor (for the normal profiles)
+
+The monitor only exists while the background process holds a Mutter ScreenCast
+session, so it also disappears if that process dies for any reason.
+"""
+import os
+import signal
+import subprocess
+import sys
+import time
+
+import gi
+
+gi.require_version("Gst", "1.0")
+from gi.repository import Gio, GLib, GLibUnix, Gst
+
+RUNTIME = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+PIDFILE = os.path.join(RUNTIME, "sunshine-virtual-display.pid")
+READYFILE = os.path.join(RUNTIME, "sunshine-virtual-display.ready")
+LOGFILE = os.path.join(RUNTIME, "sunshine-virtual-display.log")
+TOKENFILE = os.path.expanduser("~/.config/sunshine/portal_token")
+
+MUTTER_SC = "org.gnome.Mutter.ScreenCast"
+MUTTER_DC = "org.gnome.Mutter.DisplayConfig"
+PERM = "org.freedesktop.impl.portal.PermissionStore"
+VIRTUAL_PRODUCT = "Virtual remote monitor"
+
+bus = Gio.bus_get_sync(Gio.BusType.SESSION)
+
+
+def call(dest, path, iface, method, params=None, reply=None):
+    return bus.call_sync(dest, path, iface, method, params,
+                         GLib.VariantType(reply) if reply else None,
+                         Gio.DBusCallFlags.NONE, -1, None)
+
+
+def monitors():
+    """[(connector, vendor, product, serial)] of all monitors Mutter knows."""
+    state = call(MUTTER_DC, "/org/gnome/Mutter/DisplayConfig", MUTTER_DC,
+                 "GetCurrentState").unpack()
+    return [m[0] for m in state[1]]
+
+
+def match_string(mon):
+    # Same rule xdg-desktop-portal-gnome uses to recognise a monitor on restore.
+    _connector, vendor, product, serial = mon
+    return f"{vendor}:{product}:{serial}"
+
+
+def point_portal_at(match):
+    """Rewrite the monitor in Sunshine's saved portal permission."""
+    try:
+        with open(TOKENFILE) as f:
+            token = f.readline().strip()
+    except OSError:
+        return
+    if not token:
+        return
+    path = "/org/freedesktop/impl/portal/PermissionStore"
+    try:
+        _perms, data = call(PERM, path, PERM, "Lookup",
+                            GLib.Variant("(ss)", ("remote-desktop", token))).unpack()
+    except GLib.Error:
+        return
+    owner, version, inner = data
+    created, used, devices, flag, streams = inner
+    if not streams:
+        return
+    streams = [(sid, stype, GLib.Variant("s", match if stype == 1 else val))
+               for sid, stype, val in streams]
+    new = GLib.Variant("(suv)", (owner, version, GLib.Variant(
+        "(xxuba(uuv))", (created, used, devices, flag, streams))))
+    call(PERM, path, PERM, "SetValue",
+         GLib.Variant("(sbsv)", ("remote-desktop", False, token, new)))
+
+
+def physical_power(state):
+    """Cut/restore the physical monitor's signal (root helper, see sudoers)."""
+    subprocess.run(["sudo", "-n", "/usr/local/bin/sunshine-dp-power", state],
+                   stderr=subprocess.DEVNULL)
+
+
+def set_power_save(mode):
+    call(MUTTER_DC, "/org/gnome/Mutter/DisplayConfig", "org.freedesktop.DBus.Properties",
+         "Set", GLib.Variant("(ssv)", (MUTTER_DC, "PowerSaveMode", GLib.Variant("i", mode))))
+
+
+def blank_orphaned_outputs():
+    # Mutter never turns off the CRTC of a monitor it dropped, so the NVIDIA
+    # card keeps scanning out the last frame. Power-save disables every CRTC on
+    # the GPU; waking only re-enables outputs in the current layout.
+    set_power_save(3)
+    time.sleep(1)
+    set_power_save(0)
+
+
+def physical_match():
+    for mon in monitors():
+        if mon[2] != VIRTUAL_PRODUCT:
+            return match_string(mon)
+    return None
+
+
+def run():
+    """Background process: own the virtual monitor until signalled."""
+    width = int(os.environ.get("SUNSHINE_CLIENT_WIDTH") or 1920)
+    height = int(os.environ.get("SUNSHINE_CLIENT_HEIGHT") or 1080)
+    fps = round(float(os.environ.get("SUNSHINE_CLIENT_FPS") or 60))
+
+    Gst.init(None)
+    loop = GLib.MainLoop()
+    pipeline = None
+    before = {m[0] for m in monitors()}
+
+    session = call(MUTTER_SC, "/org/gnome/Mutter/ScreenCast", MUTTER_SC, "CreateSession",
+                   GLib.Variant("(a{sv})", ({},)), "(o)")[0]
+    stream = call(MUTTER_SC, session, MUTTER_SC + ".Session", "RecordVirtual",
+                  GLib.Variant("(a{sv})", ({"cursor-mode": GLib.Variant("u", 1),
+                                            "is-platform": GLib.Variant("b", True)},)),
+                  "(o)")[0]
+
+    def on_stream_added(*args):
+        # The virtual monitor takes the size and rate of the first consumer's format.
+        nonlocal pipeline
+        node = args[-1].unpack()[0]
+        pipeline = Gst.parse_launch(
+            f"pipewiresrc path={node} always-copy=false ! "
+            f"video/x-raw,width={width},height={height},max-framerate={fps}/1 ! "
+            "fakesink sync=false")
+        pipeline.set_state(Gst.State.PLAYING)
+        GLib.timeout_add(100, wait_for_monitor, time.monotonic() + 10)
+
+    def wait_for_monitor(deadline):
+        new = [m for m in monitors() if m[0] not in before and m[2] == VIRTUAL_PRODUCT]
+        if not new:
+            if time.monotonic() > deadline:
+                print("virtual monitor never appeared", flush=True)
+                loop.quit()
+                return False
+            return True
+        connector = new[0][0]
+        subprocess.run(["gdctl", "set", "--logical-monitor", "--primary",
+                        "--monitor", connector], check=True)
+        point_portal_at(match_string(new[0]))
+        physical_power("off")
+        blank_orphaned_outputs()
+        print(f"{connector} {width}x{height}@{fps} active", flush=True)
+        open(READYFILE, "w").close()
+        return False
+
+    bus.signal_subscribe(MUTTER_SC, MUTTER_SC + ".Stream", "PipeWireStreamAdded", stream,
+                         None, Gio.DBusSignalFlags.NONE, on_stream_added)
+    bus.signal_subscribe(MUTTER_SC, MUTTER_SC + ".Session", "Closed", session,
+                         None, Gio.DBusSignalFlags.NONE, lambda *_: loop.quit())
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        GLibUnix.signal_add(GLib.PRIORITY_DEFAULT, sig, loop.quit)
+
+    call(MUTTER_SC, session, MUTTER_SC + ".Session", "Start")
+    loop.run()
+
+    if pipeline:
+        pipeline.set_state(Gst.State.NULL)
+    try:
+        call(MUTTER_SC, session, MUTTER_SC + ".Session", "Stop")
+    except GLib.Error:
+        pass
+    # With the virtual monitor gone and DP-1 reconnected, Mutter falls back to
+    # the saved physical layout.
+    physical_power("on")
+    time.sleep(2)
+    match = physical_match()
+    if match:
+        point_portal_at(match)
+    for f in (PIDFILE, READYFILE):
+        try:
+            os.unlink(f)
+        except FileNotFoundError:
+            pass
+
+
+def running_pid():
+    try:
+        with open(PIDFILE) as f:
+            pid = int(f.read())
+        os.kill(pid, 0)
+        return pid
+    except (OSError, ValueError):
+        return None
+
+
+def stop():
+    pid = running_pid()
+    if not pid:
+        return
+    os.kill(pid, signal.SIGTERM)
+    for _ in range(50):
+        if running_pid() is None:
+            return
+        time.sleep(0.1)
+
+
+def start():
+    stop()
+    try:
+        os.unlink(READYFILE)
+    except FileNotFoundError:
+        pass
+    with open(LOGFILE, "a") as log:
+        proc = subprocess.Popen([sys.executable, os.path.abspath(__file__), "run"],
+                                stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                                start_new_session=True)
+    with open(PIDFILE, "w") as f:
+        f.write(str(proc.pid))
+    for _ in range(150):
+        if os.path.exists(READYFILE):
+            return 0
+        if proc.poll() is not None:
+            break
+        time.sleep(0.1)
+    print(f"virtual display failed to start, see {LOGFILE}", file=sys.stderr)
+    stop()
+    return 1
+
+
+def main():
+    cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+    if cmd == "start":
+        sys.exit(start())
+    elif cmd == "stop":
+        stop()
+    elif cmd == "reset":
+        stop()
+        physical_power("on")
+        time.sleep(1)
+        match = physical_match()
+        if match:
+            point_portal_at(match)
+    elif cmd == "run":
+        run()
+    else:
+        sys.exit(__doc__)
+
+
+if __name__ == "__main__":
+    main()

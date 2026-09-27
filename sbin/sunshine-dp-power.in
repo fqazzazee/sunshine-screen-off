@@ -1,0 +1,12 @@
+#!/bin/sh
+# Cut or restore the signal to the physical monitor for stream-only sessions.
+# Installed root-owned to /usr/local/bin and allowed via sudoers; the connector
+# is fixed at install time so the rule cannot be used for anything else.
+#   off: kernel treats the connector as unplugged (monitor gets no signal)
+#   on:  back to normal hotplug detection
+case "$1" in
+    off) state=off ;;
+    on)  state=detect ;;
+    *)   echo "usage: $0 on|off" >&2; exit 2 ;;
+esac
+echo "$state" > /sys/class/drm/@CONNECTOR@/status
