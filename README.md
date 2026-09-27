@@ -45,8 +45,6 @@ DDC/CI power-off (`ddcutil setvcp D6 05`) was tried first and doesn't work: many
 
 With linger, Sunshine starts before anyone logs in. It then activates `xdg-desktop-portal` before GNOME is running, so the portal comes up without the GNOME backend (no ScreenCast interface). Sunshine never retries, and every stream fails with *"failed to initialize video capture/encoding"* (503), even after you log in. Portal capture needs a logged-in GNOME session anyway, so the installer adds `sunshine-session-restart.service`, which runs on `graphical-session.target` and restarts the portal and Sunshine once the desktop is up.
 
-To stream right after a reboot without anyone at the desk, turn on GDM auto-login (`AutomaticLoginEnable=True` and `AutomaticLogin=<user>` under `[daemon]` in `/etc/gdm/custom.conf`). The installer also enables `sunshine-autologin-lock.service`, which locks the session as soon as an auto-login finishes. Sessions started with a password are not locked. You unlock from Moonlight with your password, like at the desk.
-
 ### Steam wrapper
 
 If Sunshine starts before you log in (for example a user service with linger), it has no `DISPLAY`/`XAUTHORITY`, and Steam fails with *"Unable to open a connection to X"*. `sunshine-steam` imports those variables from the live session (`systemctl --user show-environment`) before running Steam. The XAuthority filename changes every login, so it can't be hardcoded.

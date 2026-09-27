@@ -51,7 +51,6 @@ echo "    using $connector"
 step "Installing user scripts to $bindir"
 install -Dm755 "$here/bin/sunshine-virtual-display" "$bindir/sunshine-virtual-display"
 install -Dm755 "$here/bin/sunshine-steam" "$bindir/sunshine-steam"
-install -Dm755 "$here/bin/sunshine-autologin-lock" "$bindir/sunshine-autologin-lock"
 
 step "Installing root helper and sudoers rule (sudo)"
 tmp=$(mktemp -d)
@@ -120,10 +119,9 @@ unitdir="$HOME/.config/systemd/user"
 mkdir -p "$unitdir"
 sed "s/@SUNSHINE_UNIT@/$sunshine_unit/" "$here/systemd/sunshine-session-restart.service.in" \
     > "$unitdir/sunshine-session-restart.service"
-install -m644 "$here/systemd/sunshine-autologin-lock.service" "$unitdir/"
 systemctl --user daemon-reload
-systemctl --user enable sunshine-session-restart.service sunshine-autologin-lock.service
-echo "    restarts $sunshine_unit on login; locks the screen after GDM auto-login"
+systemctl --user enable sunshine-session-restart.service
+echo "    restarts $sunshine_unit on login"
 
 cat <<EOF
 
