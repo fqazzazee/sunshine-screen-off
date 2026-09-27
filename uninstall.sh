@@ -55,12 +55,18 @@ if [ -n "$capture" ] && [ -f "$confdir/sunshine.conf" ]; then
 fi
 
 step "Removing scripts"
-rm -f "$bindir/sunshine-virtual-display"
+rm -f "$bindir/sunshine-virtual-display" "$bindir/sunshine-autologin-lock"
 # sunshine-steam is still used by the plain "Steam Big Picture" app if you kept it.
 if ! grep -q sunshine-steam "$confdir/apps.json" 2>/dev/null; then
     rm -f "$bindir/sunshine-steam"
 fi
 rm -f "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"/sunshine-virtual-display.*
+
+step "Removing login hook"
+systemctl --user disable sunshine-session-restart.service sunshine-autologin-lock.service 2>/dev/null || true
+rm -f "$HOME/.config/systemd/user/sunshine-session-restart.service" \
+      "$HOME/.config/systemd/user/sunshine-autologin-lock.service"
+systemctl --user daemon-reload
 
 step "Removing root helper and sudoers rule (sudo)"
 sudo rm -f /usr/local/bin/sunshine-dp-power /etc/sudoers.d/sunshine-dp-power

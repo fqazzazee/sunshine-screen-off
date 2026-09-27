@@ -1,0 +1,16 @@
+# Sunshine started from boot (linger) comes up before GNOME: it activates
+# xdg-desktop-portal without the GNOME backend (no ScreenCast interface) and
+# never retries, so every stream fails with 503. Once the desktop session is
+# up, restart the portal and Sunshine so portal capture can connect.
+[Unit]
+Description=Restart Sunshine and xdg-desktop-portal after login
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl --user try-restart xdg-desktop-portal.service
+ExecStart=/usr/bin/systemctl --user try-restart @SUNSHINE_UNIT@
+
+[Install]
+WantedBy=graphical-session.target
