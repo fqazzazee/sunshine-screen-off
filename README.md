@@ -183,6 +183,10 @@ This brings the monitor back, removes the Screen Off apps and the `reset` prep s
 - The sudoers rule allows exactly one command, `/usr/local/bin/sunshine-dp-power on|off`. The script is root-owned and not writable by your user, and the connector it touches is fixed at install time.
 - The helper only edits the portal permission whose token is in Sunshine's own `portal_token` file, and it changes only the monitor it points at.
 
+## Support
+
+If it let you stream with your monitor dark, you can [buy me a coffee ☕](https://buymeacoffee.com/fqazzazee).
+
 ## License
 
 MIT
